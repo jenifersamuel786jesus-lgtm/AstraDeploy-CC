@@ -1,0 +1,6 @@
+{
+  "name": "AstraDeploy — Intelligent Cloud & MLOps Platform",
+  "description": "Context-aware cloud resource provisioning, workload intelligence, cost optimization, and MLOps platform with multi-tenant isolation, Terraform plans, and sizing engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

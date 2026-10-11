@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: astradeploy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: astradeploy
+      POSTGRES_PASSWORD: astradeploy_secure_password
+      POSTGRES_DB: astradeploy_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astradeploy -d astradeploy_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: astradeploy-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://astradeploy:astradeploy_secure_password@db:5432/astradeploy_db
+      SECRET_KEY: astradeploy_production_secret_key_change_in_prod
+      PORT: 8000
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: astradeploy-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+
+volumes:
+  postgres_data:
+    driver: local
