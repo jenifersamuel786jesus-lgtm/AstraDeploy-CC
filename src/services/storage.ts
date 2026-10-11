@@ -10,8 +10,11 @@ import {
   MetricPoint,
   CostOptimization,
   MLExperiment,
+  MLRun,
   MLModel,
+  MLModelVersion,
   MLPipeline,
+  MLPipelineStage,
   AlertRule,
   Incident,
   AuditLog,
@@ -1171,32 +1174,288 @@ class StorageService {
   public getMLExperiments(workspaceId?: string): MLExperiment[] {
     const wsId = workspaceId || this.getCurrentWorkspaceId();
     const all = this.getItem<MLExperiment[]>(STORAGE_KEYS.ML_EXPERIMENTS, SEED_ML_EXPERIMENTS);
-    return all.filter((e) => e.workspaceId === wsId);
+    const filtered = all.filter((e) => e.workspaceId === wsId);
+    if (filtered.length === 0) {
+      const defaultExp: MLExperiment = {
+        id: `exp-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+        workspaceId: wsId,
+        name: 'Workload Sizing & Latency Predictor',
+        description: 'Supervised regressor predicting optimal vCPU and RAM from requests-per-second and latency SLAs',
+        framework: 'scikit-learn',
+        datasetName: 'cloud-workload-telemetry-corpus',
+        datasetSamples: 75000,
+        createdAt: new Date().toISOString(),
+        runs: [
+          {
+            id: `run-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+            experimentId: `exp-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+            runNumber: 1,
+            parameters: {
+              learning_rate: 0.01,
+              batch_size: 64,
+              epochs: 30,
+              optimizer: 'adam',
+              model_architecture: 'gradient_boosting_regressor_100',
+            },
+            metrics: {
+              train_loss: 0.042,
+              val_loss: 0.051,
+              rmse: 0.058,
+            },
+            lossHistory: [
+              { step: 1, loss: 0.38, valLoss: 0.42 },
+              { step: 10, loss: 0.18, valLoss: 0.21 },
+              { step: 20, loss: 0.09, valLoss: 0.12 },
+              { step: 30, loss: 0.042, valLoss: 0.051 },
+            ],
+            durationSec: 480,
+            status: 'completed',
+            artifactUri: `s3://astradeploy-artifacts/models/sizing_v1.joblib`,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const updated = [...all, defaultExp];
+      this.setItem(STORAGE_KEYS.ML_EXPERIMENTS, updated);
+      return [defaultExp];
+    }
+    return filtered;
   }
 
-  public createMLExperiment(name: string, description: string, framework: MLExperiment['framework'], datasetName: string): MLExperiment {
+  public createMLExperiment(
+    name: string,
+    description: string,
+    framework: MLExperiment['framework'],
+    datasetName: string,
+    autoRun = true
+  ): MLExperiment {
     const wsId = this.getCurrentWorkspaceId();
+    const expId = `exp-${Date.now().toString(36)}`;
+    
+    // If autoRun is enabled, generate an initial training run #1
+    const runs: MLRun[] = autoRun
+      ? [
+          {
+            id: `run-${Date.now().toString(36)}-01`,
+            experimentId: expId,
+            runNumber: 1,
+            parameters: {
+              learning_rate: framework === 'PyTorch' || framework === 'TensorFlow' ? 0.001 : 0.05,
+              batch_size: 64,
+              epochs: 25,
+              optimizer: 'adam',
+              model_architecture: `${framework.toLowerCase()}_baseline_v1`,
+            },
+            metrics: {
+              train_loss: 0.038,
+              val_loss: 0.045,
+              f1_score: 0.976,
+              accuracy: 0.982,
+            },
+            lossHistory: [
+              { step: 1, loss: 0.41, valLoss: 0.45 },
+              { step: 5, loss: 0.22, valLoss: 0.25 },
+              { step: 15, loss: 0.08, valLoss: 0.11 },
+              { step: 25, loss: 0.038, valLoss: 0.045 },
+            ],
+            durationSec: 310,
+            status: 'completed',
+            artifactUri: `s3://astradeploy-artifacts/models/${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}_run1.onnx`,
+            createdAt: new Date().toISOString(),
+          },
+        ]
+      : [];
+
     const exp: MLExperiment = {
-      id: `exp-${Date.now().toString(36)}`,
+      id: expId,
       workspaceId: wsId,
       name,
       description,
       framework,
       datasetName,
       datasetSamples: 100000,
-      runs: [],
+      runs,
       createdAt: new Date().toISOString(),
     };
     const all = [...this.getItem<MLExperiment[]>(STORAGE_KEYS.ML_EXPERIMENTS, SEED_ML_EXPERIMENTS), exp];
     this.setItem(STORAGE_KEYS.ML_EXPERIMENTS, all);
-    this.logAuditEvent('CREATE_ML_EXPERIMENT', 'MLExperiment', name, `Created experiment with framework ${framework}`);
+    this.logAuditEvent(
+      'CREATE_ML_EXPERIMENT',
+      'MLExperiment',
+      name,
+      `Created experiment with framework ${framework} (${autoRun ? 'Baseline Run #1 executed' : '0 runs'})`
+    );
     return exp;
+  }
+
+  public addRunToExperiment(
+    experimentId: string,
+    params?: Partial<MLRun['parameters']>
+  ): MLRun {
+    const allExp = this.getItem<MLExperiment[]>(STORAGE_KEYS.ML_EXPERIMENTS, SEED_ML_EXPERIMENTS);
+    const exp = allExp.find((e) => e.id === experimentId);
+    const runNum = exp ? exp.runs.length + 1 : 1;
+    const lr = params?.learning_rate ?? 0.001;
+    const ep = params?.epochs ?? 30;
+    const bs = params?.batch_size ?? 64;
+    const opt = params?.optimizer ?? 'adam';
+    const arch = params?.model_architecture ?? `${exp?.framework || 'ML'}_optimized_arch_v${runNum}`;
+
+    // Realistic loss history simulation
+    const steps = [1, Math.round(ep * 0.25), Math.round(ep * 0.5), Math.round(ep * 0.75), ep];
+    const baseLoss = 0.45;
+    const trainLossFinal = parseFloat((0.02 + Math.random() * 0.025).toFixed(3));
+    const valLossFinal = parseFloat((trainLossFinal + 0.008 + Math.random() * 0.012).toFixed(3));
+    const f1Score = parseFloat((0.965 + Math.random() * 0.028).toFixed(3));
+
+    const lossHistory = steps.map((s, idx) => {
+      const progress = (idx + 1) / steps.length;
+      return {
+        step: s,
+        loss: parseFloat((baseLoss * Math.exp(-progress * 2.5) + trainLossFinal).toFixed(3)),
+        valLoss: parseFloat((baseLoss * 1.1 * Math.exp(-progress * 2.3) + valLossFinal).toFixed(3)),
+      };
+    });
+
+    const newRun: MLRun = {
+      id: `run-${Date.now().toString(36)}-${runNum}`,
+      experimentId,
+      runNumber: runNum,
+      parameters: {
+        learning_rate: lr,
+        batch_size: bs,
+        epochs: ep,
+        optimizer: opt,
+        model_architecture: arch,
+      },
+      metrics: {
+        train_loss: trainLossFinal,
+        val_loss: valLossFinal,
+        f1_score: f1Score,
+        accuracy: parseFloat((f1Score + 0.005).toFixed(3)),
+      },
+      lossHistory,
+      durationSec: Math.round(180 + ep * 12 + Math.random() * 60),
+      status: 'completed',
+      artifactUri: `s3://astradeploy-artifacts/models/${(exp?.name || 'model').toLowerCase().replace(/[^a-z0-9]/g, '_')}_run${runNum}.onnx`,
+      createdAt: new Date().toISOString(),
+    };
+
+    const updatedExpList = allExp.map((e) => {
+      if (e.id === experimentId) {
+        return {
+          ...e,
+          runs: [...e.runs, newRun],
+        };
+      }
+      return e;
+    });
+
+    this.setItem(STORAGE_KEYS.ML_EXPERIMENTS, updatedExpList);
+    this.logAuditEvent(
+      'RUN_ML_EXPERIMENT',
+      'MLExperiment',
+      exp?.name || experimentId,
+      `Executed Run #${runNum} with LR=${lr}, Epochs=${ep}, Val Loss=${valLossFinal}, F1=${(f1Score * 100).toFixed(1)}%`
+    );
+    return newRun;
+  }
+
+  public registerModelFromRun(
+    experimentId: string,
+    runId: string,
+    modelName: string,
+    task: MLModel['task'] = 'Classification'
+  ): MLModel {
+    const wsId = this.getCurrentWorkspaceId();
+    const allModels = this.getItem<MLModel[]>(STORAGE_KEYS.ML_MODELS, SEED_ML_MODELS);
+    const allExp = this.getItem<MLExperiment[]>(STORAGE_KEYS.ML_EXPERIMENTS, SEED_ML_EXPERIMENTS);
+    const exp = allExp.find((e) => e.id === experimentId);
+    const run = exp?.runs.find((r) => r.id === runId);
+
+    const f1 = run?.metrics.f1_score ?? 0.978;
+    const newVersion: MLModelVersion = {
+      id: `ver-${Date.now().toString(36)}`,
+      modelId: '',
+      version: 'v1.0.0',
+      runId,
+      stage: 'Development',
+      metrics: {
+        f1,
+        latencyMs: parseFloat((12 + Math.random() * 8).toFixed(1)),
+        sizeMb: parseFloat((25 + Math.random() * 20).toFixed(1)),
+      },
+      checksum: `sha256:${Math.random().toString(16).substring(2, 10)}${Math.random().toString(16).substring(2, 10)}`,
+      createdAt: new Date().toISOString(),
+    };
+
+    let targetModel = allModels.find((m) => m.workspaceId === wsId && m.name.toLowerCase() === modelName.toLowerCase());
+    let updatedModels: MLModel[];
+
+    if (targetModel) {
+      newVersion.modelId = targetModel.id;
+      const nextVerNum = targetModel.versions.length + 1;
+      newVersion.version = `v${nextVerNum}.0.0`;
+      updatedModels = allModels.map((m) =>
+        m.id === targetModel!.id
+          ? { ...m, versions: [newVersion, ...m.versions] }
+          : m
+      );
+    } else {
+      const modelId = `model-${Date.now().toString(36)}`;
+      newVersion.modelId = modelId;
+      targetModel = {
+        id: modelId,
+        workspaceId: wsId,
+        name: modelName,
+        task,
+        framework: exp?.framework || 'XGBoost',
+        tags: ['experiment-promoted', 'auto-registered'],
+        versions: [newVersion],
+      };
+      updatedModels = [targetModel, ...allModels];
+    }
+
+    this.setItem(STORAGE_KEYS.ML_MODELS, updatedModels);
+    this.logAuditEvent(
+      'REGISTER_MODEL',
+      'MLModel',
+      modelName,
+      `Registered model version ${newVersion.version} from experiment run ${runId}`
+    );
+    return targetModel;
   }
 
   public getMLModels(workspaceId?: string): MLModel[] {
     const wsId = workspaceId || this.getCurrentWorkspaceId();
     const all = this.getItem<MLModel[]>(STORAGE_KEYS.ML_MODELS, SEED_ML_MODELS);
-    return all.filter((m) => m.workspaceId === wsId);
+    const filtered = all.filter((m) => m.workspaceId === wsId);
+    if (filtered.length === 0) {
+      const defaultModel: MLModel = {
+        id: `model-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+        workspaceId: wsId,
+        name: 'WorkloadPredictor-Engine',
+        task: 'Regression',
+        framework: 'scikit-learn 1.4',
+        tags: ['workload-intelligence', 'sizing'],
+        versions: [
+          {
+            id: `ver-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+            modelId: `model-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+            version: 'v1.0.0',
+            runId: `run-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+            stage: 'Production',
+            metrics: { f1: 0.965, latencyMs: 6.4, sizeMb: 18.2 },
+            checksum: 'sha256:4a89bc213fe109c',
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      };
+      const updated = [...all, defaultModel];
+      this.setItem(STORAGE_KEYS.ML_MODELS, updated);
+      return [defaultModel];
+    }
+    return filtered;
   }
 
   public promoteModelStage(modelId: string, versionId: string, newStage: 'Development' | 'Staging' | 'Production' | 'Archived'): void {
@@ -1216,7 +1475,161 @@ class StorageService {
   public getMLPipelines(workspaceId?: string): MLPipeline[] {
     const wsId = workspaceId || this.getCurrentWorkspaceId();
     const all = this.getItem<MLPipeline[]>(STORAGE_KEYS.ML_PIPELINES, SEED_ML_PIPELINES);
-    return all.filter((p) => p.workspaceId === wsId);
+    const filtered = all.filter((p) => p.workspaceId === wsId);
+    if (filtered.length === 0) {
+      const defaultPipeline: MLPipeline = {
+        id: `pipe-${wsId.replace(/[^a-z0-9]/gi, '')}-01`,
+        workspaceId: wsId,
+        name: 'Continuous Retraining & Serving Pipeline DAG',
+        description: 'Automated feature extraction, drift auditing, distributed training, latency benchmarks, and progressive canary rollouts',
+        trigger: 'scheduled_cron',
+        lastRunStatus: 'success',
+        lastRunAt: new Date().toISOString(),
+        stages: [
+          {
+            id: 'stg-1',
+            name: 'Feature Store Extraction & Drift Check',
+            status: 'success',
+            duration: '3m 45s',
+            stepOutputSummary: '1.25M telemetry rows extracted; PSI = 0.024 (drift tolerance < 0.1)',
+          },
+          {
+            id: 'stg-2',
+            name: 'Automated Model Training & Loss Checkpoint',
+            status: 'success',
+            duration: '12m 10s',
+            stepOutputSummary: 'Loss converged to 0.031; Validation F1 = 98.4%',
+          },
+          {
+            id: 'stg-3',
+            name: 'Shadow Latency & Accuracy Evaluation',
+            status: 'success',
+            duration: '4m 30s',
+            stepOutputSummary: 'p95 latency = 15.8ms (target < 35ms); 0 degradation',
+          },
+          {
+            id: 'stg-4',
+            name: 'Model Registry Version Checksum Gate',
+            status: 'success',
+            duration: '1m 05s',
+            stepOutputSummary: 'SHA256 verified; registered to staging candidate pool',
+          },
+          {
+            id: 'stg-5',
+            name: 'Canary Gate (10% Traffic Shift)',
+            status: 'success',
+            duration: '8m 20s',
+            stepOutputSummary: 'Zero 5xx error spikes; error rate 0.01%; promoted to primary serving',
+          },
+        ],
+      };
+      const updated = [...all, defaultPipeline];
+      this.setItem(STORAGE_KEYS.ML_PIPELINES, updated);
+      return [defaultPipeline];
+    }
+    return filtered;
+  }
+
+  public updateMLPipeline(pipeline: MLPipeline): void {
+    const all = this.getItem<MLPipeline[]>(STORAGE_KEYS.ML_PIPELINES, SEED_ML_PIPELINES);
+    const updated = all.map((p) => (p.id === pipeline.id ? pipeline : p));
+    this.setItem(STORAGE_KEYS.ML_PIPELINES, updated);
+  }
+
+  public executeMLPipelineRun(pipelineId: string): MLPipeline {
+    const all = this.getItem<MLPipeline[]>(STORAGE_KEYS.ML_PIPELINES, SEED_ML_PIPELINES);
+    const target = all.find((p) => p.id === pipelineId);
+    const now = new Date().toISOString();
+    const updatedStages: MLPipelineStage[] = (target?.stages || []).map((stg) => ({
+      ...stg,
+      status: 'success' as const,
+    }));
+
+    const updatedPipeline: MLPipeline = target
+      ? {
+          ...target,
+          lastRunAt: now,
+          lastRunStatus: 'success',
+          stages: updatedStages,
+        }
+      : {
+          id: pipelineId,
+          workspaceId: this.getCurrentWorkspaceId(),
+          name: 'Continuous Retraining DAG',
+          description: 'Executed pipeline',
+          trigger: 'manual',
+          lastRunAt: now,
+          lastRunStatus: 'success',
+          stages: updatedStages,
+        };
+
+    const updatedList = all.map((p) => (p.id === pipelineId ? updatedPipeline : p));
+    this.setItem(STORAGE_KEYS.ML_PIPELINES, updatedList);
+    this.logAuditEvent(
+      'EXECUTE_PIPELINE',
+      'MLPipeline',
+      updatedPipeline.name,
+      `Executed complete pipeline DAG run: all ${updatedStages.length} stages passed successfully`
+    );
+    return updatedPipeline;
+  }
+
+  public createMLPipeline(
+    name: string,
+    description: string,
+    trigger: MLPipeline['trigger'] = 'scheduled_cron'
+  ): MLPipeline {
+    const wsId = this.getCurrentWorkspaceId();
+    const newPipeline: MLPipeline = {
+      id: `pipe-${Date.now().toString(36)}`,
+      workspaceId: wsId,
+      name,
+      description,
+      trigger,
+      lastRunStatus: 'success',
+      lastRunAt: new Date().toISOString(),
+      stages: [
+        {
+          id: `stg-${Date.now().toString(36)}-1`,
+          name: 'Feature Store Extraction & Drift Check',
+          status: 'success',
+          duration: '3m 15s',
+          stepOutputSummary: 'Extracted training partition; PSI = 0.021',
+        },
+        {
+          id: `stg-${Date.now().toString(36)}-2`,
+          name: 'Model Retraining & Loss Convergence',
+          status: 'success',
+          duration: '9m 40s',
+          stepOutputSummary: 'Val loss 0.034; F1 score 98.1%',
+        },
+        {
+          id: `stg-${Date.now().toString(36)}-3`,
+          name: 'Shadow SLA & Accuracy Benchmarking',
+          status: 'success',
+          duration: '4m 00s',
+          stepOutputSummary: 'p95 latency 14.2ms; passed strict SLA',
+        },
+        {
+          id: `stg-${Date.now().toString(36)}-4`,
+          name: 'Model Registry Checksum Gate',
+          status: 'success',
+          duration: '1m 10s',
+          stepOutputSummary: 'Checksum verified; registered as candidate',
+        },
+        {
+          id: `stg-${Date.now().toString(36)}-5`,
+          name: 'Canary Shift (10% Traffic Gate)',
+          status: 'success',
+          duration: '6m 30s',
+          stepOutputSummary: 'Canary health verified; full rollout complete',
+        },
+      ],
+    };
+    const all = [...this.getItem<MLPipeline[]>(STORAGE_KEYS.ML_PIPELINES, SEED_ML_PIPELINES), newPipeline];
+    this.setItem(STORAGE_KEYS.ML_PIPELINES, all);
+    this.logAuditEvent('CREATE_PIPELINE', 'MLPipeline', name, `Created new MLOps pipeline DAG with 5 stages`);
+    return newPipeline;
   }
 
   // --- Alerts & Incidents ---

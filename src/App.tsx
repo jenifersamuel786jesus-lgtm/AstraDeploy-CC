@@ -234,9 +234,42 @@ export default function App() {
     name: string,
     desc: string,
     framework: any,
-    dataset: string
+    dataset: string,
+    autoRun = true
   ) => {
-    storage.createMLExperiment(name, desc, framework, dataset);
+    storage.createMLExperiment(name, desc, framework, dataset, autoRun);
+    refreshTenantData();
+  };
+
+  const handleAddRunToExperiment = (
+    experimentId: string,
+    params?: any
+  ) => {
+    storage.addRunToExperiment(experimentId, params);
+    refreshTenantData();
+  };
+
+  const handleRegisterModelFromRun = (
+    experimentId: string,
+    runId: string,
+    modelName: string,
+    task?: any
+  ) => {
+    storage.registerModelFromRun(experimentId, runId, modelName, task);
+    refreshTenantData();
+  };
+
+  const handleExecutePipeline = (pipelineId: string) => {
+    storage.executeMLPipelineRun(pipelineId);
+    refreshTenantData();
+  };
+
+  const handleCreatePipeline = (
+    name: string,
+    description: string,
+    trigger: any
+  ) => {
+    storage.createMLPipeline(name, description, trigger);
     refreshTenantData();
   };
 
@@ -439,6 +472,9 @@ export default function App() {
               <MLExperimentsView
                 experiments={experiments}
                 onCreateExperiment={handleCreateExperiment}
+                onAddRunToExperiment={handleAddRunToExperiment}
+                onRegisterModel={handleRegisterModelFromRun}
+                onDeployModel={(name, rps) => handleAutoRegisterAndDeploy(name, 'ML Model Serving', rps)}
               />
             )}
 
@@ -450,7 +486,11 @@ export default function App() {
             )}
 
             {currentView === 'ml-pipelines' && (
-              <MLPipelinesView pipelines={pipelines} />
+              <MLPipelinesView
+                pipelines={pipelines}
+                onExecutePipeline={handleExecutePipeline}
+                onCreatePipeline={handleCreatePipeline}
+              />
             )}
 
             {currentView === 'alerts' && (
